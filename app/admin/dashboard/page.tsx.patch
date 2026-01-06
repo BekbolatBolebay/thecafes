@@ -1,0 +1,20 @@
+--- a/app/admin/dashboard/page.tsx
++++ b/app/admin/dashboard/page.tsx
+@@ -28,7 +28,7 @@ export default function AdminDashboard() {
+   const router = useRouter()
+   const { adminUser, isAuthenticated, logout, demoModeEnabled, setDemoMode, error, clearError } = useAdmin()
+ 
+-  const { demoModeEnabled: demoMode } = useDemoMode()
++  const { demoModeEnabled: demoMode, toggleDemoMode } = useDemoMode()
+   const [isLoading, setIsLoading] = useState(false)
+ 
+   useEffect(() => {
+@@ -48,7 +48,7 @@ export default function AdminDashboard() {
+       setIsLoading(true)
+       console.log('Toggling demo mode...')
+ 
+-      await setDemoMode(!demoModeEnabled)
++      await toggleDemoMode(!demoModeEnabled)
+ 
+       console.log('Demo mode toggled')
+     } catch (error) {

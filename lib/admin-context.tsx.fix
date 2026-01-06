@@ -1,0 +1,32 @@
+// ============================================================================
+// PERMISSION HOOK - FIXED
+// ============================================================================
+
+export function usePermission(permission?: string) {
+  const context = useAdmin()
+  
+  if (permission) {
+    // If permission is provided, return a boolean
+    return context.hasPermission(permission)
+  }
+  
+  // Otherwise return the methods
+  return { 
+    hasPermission: context.hasPermission, 
+    canPerformAction: context.canPerformAction 
+  }
+}
+
+// ============================================================================
+// DEMO MODE HOOK
+// ============================================================================
+
+export function useDemoMode() {
+  const { demoModeEnabled, updateAdminUser } = useAdmin()
+  
+  const toggleDemoMode = async (enabled: boolean) => {
+    await updateAdminUser({ demoModeEnabled: enabled })
+  }
+  
+  return { demoModeEnabled, toggleDemoMode }
+}

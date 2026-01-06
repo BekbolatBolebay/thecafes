@@ -1,0 +1,565 @@
+"use client"
+
+import { createContext, useContext, useState, useEffect, type ReactNode } from "react"
+import type { Language } from "./translations"
+import { getSupabase } from "./supabase"
+
+// Types
+export interface Restaurant {
+  id: string
+  name: string
+  image: string
+  rating: number
+  deliveryTime: string
+  categories: string[]
+  description?: string
+  distance?: string
+  badges?: string[]
+  address?: string
+  reviewCount?: number
+}
+
+export interface FoodItem {
+  id: string
+  name: string
+  image: string
+  price: number
+  description: string
+  restaurant: string
+  restaurantId: string
+  rating: number
+  deliveryTime: string
+  categories: string[]
+  discount?: number
+}
+
+export interface CartItem extends FoodItem {
+  quantity: number
+}
+
+export interface User {
+  id: string
+  name: string
+  email: string
+  phone: string
+  city: string
+  address?: string
+  avatar?: string
+  isAdmin?: boolean
+}
+export interface Booking {
+  id: string
+  restaurantId: string
+  restaurantName: string
+  date: string
+  time: string
+  guests: number
+  notes?: string
+  status: "pending" | "confirmed" | "cancelled"
+  createdAt: Date
+}
+
+export interface BookingItem extends Booking {
+  quantity?: number
+}
+
+
+interface AppState {
+  user: User | null
+  cart: CartItem[]
+  favorites: Set<string>
+  location: string
+  searchQuery: string
+  isAuthenticated: boolean
+  theme: "light" | "dark"
+  language: Language
+  bookings: Booking[]
+}
+
+interface AppContextType extends AppState {
+  login: (email: string, password: string) => Promise<boolean>
+  logout: () => void
+  register: (userData: Omit<User, "id"> & { password: string }) => Promise<boolean>
+  updateUser: (userData: Partial<User>) => Promise<boolean>
+  addToCart: (item: FoodItem) => void
+  removeFromCart: (itemId: string) => void
+  updateQuantity: (itemId: string, quantity: number) => void
+  clearCart: () => void
+  toggleFavorite: (itemId: string) => void
+  setLocation: (location: string) => void
+  setSearchQuery: (query: string) => void
+  getCartTotal: () => number
+  getCartCount: () => number
+  toggleTheme: () => void
+  setLanguage: (lang: Language) => void
+  addBooking: (booking: Booking) => void
+  removeBooking: (bookingId: string) => void
+  getBookings: () => Booking[]
+}
+
+const AppContext = createContext<AppContextType | undefined>(undefined)
+
+export function AppProvider({ children }: { children: ReactNode }) {
+  const [state, setState] = useState<AppState>({
+    user: null,
+    cart: [],
+    favorites: new Set(),
+    location: "Қызылорда",
+    searchQuery: "",
+    isAuthenticated: false,
+    theme: "light",
+    language: "kk",
+    bookings: [],
+  })
+
+  const [isLoaded, setIsLoaded] = useState(false)
+
+  // Load from localStorage on mount
+  useEffect(() => {
+    const initializeAuth = async () => {
+      const savedState = localStorage.getItem("foodDeliveryState")
+      if (savedState) {
+        try {
+          const parsed = JSON.parse(savedState)
+          setState((prev) => ({
+            ...prev,
+            cart: Array.isArray(parsed.cart) ? parsed.cart : prev.cart,
+            favorites: new Set(parsed.favorites || []),
+            location: typeof parsed.location === "string" ? parsed.location : prev.location,
+            searchQuery: typeof parsed.searchQuery === "string" ? parsed.searchQuery : prev.searchQuery,
+            theme: parsed.theme === "dark" ? "dark" : "light",
+            language: parsed.language === "kk" || parsed.language === "ru" || parsed.language === "en" ? parsed.language : prev.language,
+          }))
+        } catch (error) {
+          console.error("[v0] Error loading state:", error)
+        }
+      }
+
+      // Суpabase сессиясын тексеру
+      try {
+        const supabaseClient = getSupabase()
+        if (supabaseClient) {
+          const { data, error } = await supabaseClient.auth.getSession()
+          const sessionUser = data?.session?.user
+          if (sessionUser?.id) {
+            const user = sessionUser
+            
+            // Қолданушы деректерін алу
+            const { data: userData } = await supabaseClient
+              .from("users")
+              .select("*")
+              .eq("id", user.id)
+              .single()
+
+            if (userData) {
+              setState((prev) => ({
+                ...prev,
+                user: {
+                  id: userData.id,
+                  name: userData.full_name || userData.email,
+                  email: userData.email,
+                  phone: userData.phone || "",
+                  city: userData.city || "Қызылорда",
+                  address: userData.address || "",
+                  isAdmin: userData.is_admin || false,
+                },
+                isAuthenticated: true,
+              }))
+            }
+          }
+        }
+      } catch (error) {
+        console.error("[v0] Auth initialization error:", error)
+      }
+
+      setIsLoaded(true)
+    }
+
+    initializeAuth()
+  }, [])
+
+  // Save to localStorage on state change
+  useEffect(() => {
+    if (isLoaded) {
+      localStorage.setItem(
+        "foodDeliveryState",
+        JSON.stringify({
+          cart: state.cart,
+          favorites: Array.from(state.favorites),
+          location: state.location,
+          searchQuery: state.searchQuery,
+          theme: state.theme,
+          language: state.language,
+        }),
+      )
+    }
+  }, [state.cart, state.favorites, state.location, state.searchQuery, state.theme, state.language, isLoaded])
+
+  const login = async (email: string, password: string): Promise<boolean> => {
+    try {
+      const supabaseClient = getSupabase()
+
+      // Суpabase-та кірісті ретинде қарастыру
+      const { data, error } = await supabaseClient.auth.signInWithPassword({
+        email,
+        password,
+      })
+
+      if (error) {
+        throw new Error(error.message)
+      }
+
+      if (data.user) {
+        const authUser = data.user
+        // Қолданушы деректерін алу
+        const { data: userData, error: userError } = await supabaseClient
+          .from("users")
+          .select("*")
+          .eq("id", data.user.id)
+          .single()
+
+        if (userError) {
+          console.error("Қолданушы деректері қатесі:", userError)
+          // RLS себепті insert/select өтпесе де, session бойынша кіргізу
+          const newUser: User = {
+            id: authUser.id,
+            name: authUser.email?.split("@")[0] || "Қолданушы",
+            email: authUser.email || "",
+            phone: "",
+            city: state.location,
+            address: "",
+            isAdmin: false,
+          }
+          setState((prev) => ({
+            ...prev,
+            user: newUser,
+            isAuthenticated: true,
+          }))
+          return true
+        }
+
+        setState((prev) => ({
+          ...prev,
+          user: {
+            id: userData.id,
+            name: userData.full_name || userData.email,
+            email: userData.email,
+            phone: userData.phone || "",
+            city: userData.city || "Қызылорда",
+            address: userData.address || "",
+            isAdmin: userData.is_admin || false,
+          },
+          isAuthenticated: true,
+        }))
+        return true
+      }
+
+      return false
+    } catch (error) {
+      console.error("Кіру қатесі:", error)
+      if (error instanceof Error) throw error
+      throw new Error("Login failed")
+    }
+  }
+
+  const logout = async () => {
+    try {
+      const supabaseClient = getSupabase()
+      if (supabaseClient) {
+        await supabaseClient.auth.signOut()
+      }
+    } catch (error) {
+      console.error("Шығу қатесі:", error)
+    }
+
+    setState((prev) => ({
+      ...prev,
+      user: null,
+      isAuthenticated: false,
+    }))
+  }
+
+  const register = async (userData: Omit<User, "id"> & { password: string }): Promise<boolean> => {
+    try {
+      if (!userData.email || !userData.name || !userData.phone || !userData.city) {
+        console.error("Барлық өрістерді толтырыңыз")
+        return false
+      }
+
+      const supabaseClient = getSupabase()
+      if (!supabaseClient) {
+        console.error("Supabase клиенті инициализделмеген")
+        return false
+      }
+
+      // Sign up without email confirmation
+      const { data, error } = await supabaseClient.auth.signUp({
+        email: userData.email,
+        password: userData.password,
+        options: {
+          data: {
+            full_name: userData.name,
+            phone: userData.phone,
+            city: userData.city,
+            address: userData.address || "",
+          },
+        },
+      })
+
+      if (error) {
+        console.error("Supabase signUp қатесі:", error)
+        const anyErr: any = error
+        const extra = [anyErr?.status, anyErr?.code, anyErr?.name].filter(Boolean).join(" | ")
+        throw new Error(`SignUp failed: ${error.message}${extra ? ` (${extra})` : ""}`)
+      }
+
+      if (!data.user) {
+        throw new Error("User creation failed")
+      }
+
+      // Create user profile in public.users table directly
+      // (Bypass email confirmation requirement)
+      const { error: insertError } = await supabaseClient
+        .from("users")
+        .insert({
+          id: data.user.id,
+          email: userData.email,
+          full_name: userData.name,
+          phone: userData.phone,
+          city: userData.city,
+          address: userData.address || "",
+          is_admin: false,
+        })
+
+      if (insertError) {
+        console.error("Profile insert қатесі:", insertError)
+        // Try to continue anyway - session might still work
+      }
+
+      // Set session if available
+      if (data.session) {
+        try {
+          await supabaseClient.auth.setSession({
+            access_token: data.session.access_token,
+            refresh_token: data.session.refresh_token,
+          })
+        } catch (e) {
+          console.warn("Session орнату қатесі:", e)
+        }
+      }
+
+      // Update local state
+      const newUser: User = {
+        id: data.user.id,
+        name: userData.name,
+        email: userData.email,
+        phone: userData.phone,
+        city: userData.city,
+        address: userData.address || "",
+        isAdmin: false,
+      }
+
+      setState((prev) => ({
+        ...prev,
+        user: newUser,
+        isAuthenticated: true,
+        location: userData.city,
+      }))
+
+      return true
+    } catch (error) {
+      console.error("Тіркеу процесі қатесі:", error)
+      if (error instanceof Error) throw error
+      throw new Error("Registration failed")
+    }
+  }
+
+  const updateUser = async (userData: Partial<User>) => {
+    if (!state.user || !state.isAuthenticated) return false
+
+    const supabaseClient = getSupabase()
+    const payload: {
+      full_name?: string
+      phone?: string
+      city?: string
+      address?: string
+    } = {}
+
+    if (typeof userData.name === "string") payload.full_name = userData.name
+    if (typeof userData.phone === "string") payload.phone = userData.phone
+    if (typeof userData.city === "string") payload.city = userData.city
+    if (typeof userData.address === "string") payload.address = userData.address
+
+    try {
+      if (Object.keys(payload).length > 0) {
+        const { error } = await supabaseClient
+          .from("users")
+          .update(payload)
+          .eq("id", state.user.id)
+
+        if (error) {
+          console.error("Update қатесі:", error)
+          return false
+        }
+      }
+
+      setState((prev) => ({
+        ...prev,
+        user: prev.user
+          ? {
+              ...prev.user,
+              ...userData,
+            }
+          : null,
+      }))
+
+      return true
+    } catch (error) {
+      console.error("User update failed:", error)
+      return false
+    }
+  }
+
+  const addToCart = (item: FoodItem) => {
+    setState((prev) => {
+      const existingItem = prev.cart.find((ci) => ci.id === item.id)
+      if (existingItem) {
+        return {
+          ...prev,
+          cart: prev.cart.map((ci) => (ci.id === item.id ? { ...ci, quantity: ci.quantity + 1 } : ci)),
+        }
+      }
+      return {
+        ...prev,
+        cart: [...prev.cart, { ...item, quantity: 1 }],
+      }
+    })
+  }
+
+  const removeFromCart = (itemId: string) => {
+    setState((prev) => ({
+      ...prev,
+      cart: prev.cart.filter((item) => item.id !== itemId),
+    }))
+  }
+
+  const updateQuantity = (itemId: string, quantity: number) => {
+    if (quantity <= 0) {
+      removeFromCart(itemId)
+      return
+    }
+
+    setState((prev) => ({
+      ...prev,
+      cart: prev.cart.map((item) => (item.id === itemId ? { ...item, quantity } : item)),
+    }))
+  }
+
+  const clearCart = () => {
+    setState((prev) => ({
+      ...prev,
+      cart: [],
+    }))
+  }
+
+  const toggleFavorite = (itemId: string) => {
+    setState((prev) => {
+      const newFavorites = new Set(prev.favorites)
+      if (newFavorites.has(itemId)) {
+        newFavorites.delete(itemId)
+      } else {
+        newFavorites.add(itemId)
+      }
+      return {
+        ...prev,
+        favorites: newFavorites,
+      }
+    })
+  }
+
+  const setLocation = (location: string) => {
+    setState((prev) => ({
+      ...prev,
+      location,
+    }))
+  }
+
+  const setSearchQuery = (query: string) => {
+    setState((prev) => ({
+      ...prev,
+      searchQuery: query,
+    }))
+  }
+
+  const getCartTotal = () => {
+    return state.cart.reduce((total, item) => total + item.price * item.quantity, 0)
+  }
+
+  const getCartCount = () => {
+    return state.cart.reduce((count, item) => count + item.quantity, 0)
+  }
+
+  const toggleTheme = () => {
+    setState((prev) => ({
+      ...prev,
+      theme: prev.theme === "light" ? "dark" : "light",
+    }))
+  }
+
+  const setLanguage = (lang: Language) => {
+    setState((prev) => ({
+      ...prev,
+      language: lang,
+    }))
+  }
+
+  const addBooking = (booking: Booking) => {
+    setState((prev) => ({
+      ...prev,
+      bookings: [...prev.bookings, booking],
+    }))
+  }
+
+  const removeBooking = (bookingId: string) => {
+    setState((prev) => ({
+      ...prev,
+      bookings: prev.bookings.filter((b) => b.id !== bookingId),
+    }))
+  }
+
+  const getBookings = () => {
+    return state.bookings
+  }
+
+  const value: AppContextType = {
+    ...state,
+    login,
+    logout,
+    register,
+    updateUser,
+    addToCart,
+    removeFromCart,
+    updateQuantity,
+    clearCart,
+    toggleFavorite,
+    setLocation,
+    setSearchQuery,
+    getCartTotal,
+    getCartCount,
+    toggleTheme,
+    setLanguage,
+    addBooking,
+    removeBooking,
+    getBookings,
+  }
+
+  return <AppContext.Provider value={value}>{children}</AppContext.Provider>
+}
+
+export function useApp() {
+  const context = useContext(AppContext)
+  if (context === undefined) {
+    throw new Error("useApp must be used within AppProvider")
+  }
+  return context
+}

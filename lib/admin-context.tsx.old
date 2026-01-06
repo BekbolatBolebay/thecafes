@@ -1,0 +1,272 @@
+// ============================================================================
+// ADMIN CONTEXT & PROVIDER
+// ============================================================================
+// Location: lib/admin-context.tsx
+// Purpose: Global state management for admin authentication and RBAC
+// Usage: Wrap your app with <AdminProvider> to enable admin features
+// ============================================================================
+
+"use client"
+
+import React, { createContext, useContext, useState, useEffect, ReactNode } from "react"
+import type { AdminUser, AdminRole } from "./admin-auth"
+import {
+  getAdminSessionToken,
+  storeAdminSessionToken,
+  clearAdminSessionToken,
+  getAdminUser,
+  storeAdminUser,
+  clearAdminUser,
+  hasPermission,
+  canPerformAction,
+  generateSessionToken,
+  AdminRole as AdminRoleEnum,
+} from "./admin-auth"
+
+// ============================================================================
+// ADMIN CONTEXT INTERFACE
+// ============================================================================
+
+interface AdminContextType {
+  // User state
+  adminUser: AdminUser | null
+  isAuthenticated: boolean
+  isLoading: boolean
+  error: string | null
+
+  // Session state
+  sessionToken: string | null
+  demoModeEnabled: boolean
+
+  // Methods
+  login: (email: string, password: string) => Promise<{ success: boolean; message?: string }>
+  logout: () => Promise<void>
+  updateAdminUser: (updates: Partial<AdminUser>) => Promise<void>
+  clearError: () => void
+
+  // Permission methods
+  hasPermission: (permission: string) => boolean
+  canPerformAction: (action: string, resource?: string) => boolean
+}
+
+// ============================================================================
+// CREATE CONTEXT
+// ============================================================================
+
+const AdminContext = createContext<AdminContextType | undefined>(undefined)
+
+// ============================================================================
+// ADMIN PROVIDER COMPONENT
+// ============================================================================
+
+interface AdminProviderProps {
+  children: ReactNode
+}
+
+export function AdminProvider({ children }: AdminProviderProps) {
+  const [adminUser, setAdminUser] = useState<AdminUser | null>(null)
+  const [sessionToken, setSessionToken] = useState<string | null>(null)
+  const [isLoading, setIsLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [demoModeEnabled, setDemoModeEnabled] = useState(false)
+
+  // ========================================================================
+  // CHECK AUTHENTICATION ON MOUNT
+  // ========================================================================
+
+  useEffect(() => {
+    const checkAuth = () => {
+      try {
+        const storedToken = getAdminSessionToken()
+        const storedUser = getAdminUser()
+
+        if (storedToken && storedUser) {
+          setSessionToken(storedToken)
+          setAdminUser(storedUser)
+          setDemoModeEnabled(storedUser.demoModeEnabled)
+        }
+      } catch (err) {
+        console.error("[AdminProvider] Auth check error:", err)
+      } finally {
+        setIsLoading(false)
+      }
+    }
+
+    checkAuth()
+  }, [])
+
+  // ========================================================================
+  // LOGIN METHOD
+  // ========================================================================
+
+  const login = async (
+    email: string,
+    password: string
+  ): Promise<{ success: boolean; message?: string }> => {
+    try {
+      setError(null)
+      setIsLoading(true)
+
+      console.log("[AdminContext] Attempting login for:", email)
+
+      const response = await fetch("/api/admin/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      })
+
+      const data = await response.json()
+
+      console.log("[AdminContext] Login response:", data.success ? "SUCCESS" : "FAILED")
+
+      if (!response.ok) {
+        const message = data.message || "Login failed"
+        console.error("[AdminContext] Login error:", message)
+        setError(message)
+        return { success: false, message }
+      }
+
+      // Store session and user data
+      console.log("[AdminContext] Storing session data...")
+      storeAdminSessionToken(data.token)
+      storeAdminUser(data.user)
+
+      setAdminUser(data.user)
+      setSessionToken(data.token)
+      setDemoModeEnabled(data.user.demoModeEnabled)
+
+      console.log("[AdminContext] Login successful!")
+      return { success: true }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "An error occurred during login"
+      console.error("[AdminContext] Login catch error:", message)
+      setError(message)
+      return { success: false, message }
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  // ========================================================================
+  // LOGOUT METHOD
+  // ========================================================================
+
+  const logout = async () => {
+    try {
+      // Call logout endpoint if needed
+      if (sessionToken) {
+        await fetch("/api/admin/auth/logout", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${sessionToken}`,
+          },
+        })
+      }
+
+      // Clear local state
+      clearAdminSessionToken()
+      clearAdminUser()
+
+      setAdminUser(null)
+      setSessionToken(null)
+      setDemoModeEnabled(false)
+    } catch (err) {
+      console.error("[AdminProvider] Logout error:", err)
+    }
+  }
+
+  // ========================================================================
+  // UPDATE ADMIN USER METHOD
+  // ========================================================================
+
+  const updateAdminUser = async (updates: Partial<AdminUser>) => {
+    try {
+      const updatedUser = {
+        ...adminUser,
+        ...updates,
+      } as AdminUser
+
+      storeAdminUser(updatedUser)
+      setAdminUser(updatedUser)
+
+      if (updates.demoModeEnabled !== undefined) {
+        setDemoModeEnabled(updates.demoModeEnabled)
+      }
+    } catch (err) {
+      console.error("[AdminProvider] Update error:", err)
+    }
+  }
+
+  // ========================================================================
+  // CLEAR ERROR METHOD
+  // ========================================================================
+
+  const clearError = () => {
+    setError(null)
+  }
+
+  // ========================================================================
+  // CONTEXT VALUE
+  // ========================================================================
+
+  const value: AdminContextType = {
+    adminUser,
+    isAuthenticated: !!adminUser && !!sessionToken,
+    isLoading,
+    error,
+    sessionToken,
+    demoModeEnabled,
+    login,
+    logout,
+    updateAdminUser,
+    clearError,
+    hasPermission: (permission: string) => {
+      if (!adminUser) return false
+      return hasPermission(adminUser.role, permission)
+    },
+    canPerformAction: (action: string, resource?: string) => {
+      if (!adminUser) return false
+      return canPerformAction(adminUser.role, action, resource)
+    },
+  }
+
+  return <AdminContext.Provider value={value}>{children}</AdminContext.Provider>
+}
+
+// ============================================================================
+// ADMIN HOOK
+// ============================================================================
+
+export function useAdmin(): AdminContextType {
+  const context = useContext(AdminContext)
+
+  if (context === undefined) {
+    throw new Error("useAdmin must be used within an AdminProvider")
+  }
+
+  return context
+}
+
+// ============================================================================
+// PERMISSION HOOK
+// ============================================================================
+
+export function usePermission() {
+  const { hasPermission, canPerformAction } = useAdmin()
+  return { hasPermission, canPerformAction }
+}
+
+// ============================================================================
+// DEMO MODE HOOK
+// ============================================================================
+
+export function useDemoMode() {
+  const { demoModeEnabled, updateAdminUser } = useAdmin()
+  
+  const toggleDemoMode = async (enabled: boolean) => {
+    await updateAdminUser({ demoModeEnabled: enabled })
+  }
+  
+  return { demoModeEnabled, toggleDemoMode }
+}
